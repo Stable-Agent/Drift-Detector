@@ -1,27 +1,29 @@
 # drift-detector
 
-> **⚠️ KNOWN BROKEN — DO NOT USE FOR PRODUCTION (as of 2026-05-26)**
->
-> The bundled model (`non_llm_detector_v0.pkl`) was trained on a
-> hand-curated sample whose resolved/failed classes had systematically
-> different feature distributions (median n_msgs 96 vs 108; mean
-> n_custom_scripts 2.5 vs 5.1). On a held-out random sample of 400
-> resolved trajectories from the same 4 sources, the detector fires at
-> **88% false-positive rate** at threshold 0.5 — it essentially predicts
-> "failure" on nearly every trajectory.
->
-> The previously-claimed "CV AUC 0.76" was real on the biased training
-> sample but does not generalize. **A corrected model is in progress.**
-> Until then, the SDK and hook will emit a `DeprecationWarning` on use.
-
 Non-LLM failure detector for coding agents (Claude Code, SWE-agent, OpenHands, …),
 shipping with a Claude Code hook that surfaces drift to the human for review.
 
-Intended behavior: predict whether an in-flight coding-agent trajectory
-is heading toward failure using 10 structural features (no LLM calls).
-Signal is real from turn ~10 and saturates around turn ~50 on the
-training sample — **but per the warning above, the current model does
-not generalize to a representative sample.**
+Predicts whether an in-flight coding-agent trajectory is heading toward
+failure using 10 structural features (no LLM calls).
+
+**Honest performance numbers** (2026-05-26 retrain on a representative
+random sample, 80/20 stratified split, n=746 SWE-bench trajectories from
+livesweagent + sonar at opus-4.5, sonnet-4.5, gemini-3):
+
+| threshold | recall | precision | FP rate |
+|---|---|---|---|
+| 0.5 | 46% | 58% | 29% |
+| 0.7 | 10% | 78% | 2.5% |
+| 0.8 | 1.4% | 100% | 0% |
+
+Held-out AUC: 0.65 (per-source 0.61–0.74). An earlier version of this
+package claimed AUC 0.76 — that was measured on a hand-curated training
+sample whose resolved/failed classes had systematically different feature
+distributions, and it does not generalize. The current model is honest
+but signal-limited; the structural features alone are not strong enough
+to reach near-zero false-positives at meaningful recall. AND-gating with
+additional signal types (in progress) is the path to better operating
+points.
 
 ## Install
 
