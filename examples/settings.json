@@ -1,0 +1,30 @@
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": ".*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "drift-hook"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "matcher": ".*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "drift-hook"
+          }
+        ]
+      }
+    ]
+  },
+  "env": {
+    "DRIFT_THRESHOLD": "0.5",
+    "DRIFT_THROTTLE_SECONDS": "30"
+  }
+}
