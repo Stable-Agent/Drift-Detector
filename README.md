@@ -1,12 +1,27 @@
 # drift-detector
 
+> **⚠️ KNOWN BROKEN — DO NOT USE FOR PRODUCTION (as of 2026-05-26)**
+>
+> The bundled model (`non_llm_detector_v0.pkl`) was trained on a
+> hand-curated sample whose resolved/failed classes had systematically
+> different feature distributions (median n_msgs 96 vs 108; mean
+> n_custom_scripts 2.5 vs 5.1). On a held-out random sample of 400
+> resolved trajectories from the same 4 sources, the detector fires at
+> **88% false-positive rate** at threshold 0.5 — it essentially predicts
+> "failure" on nearly every trajectory.
+>
+> The previously-claimed "CV AUC 0.76" was real on the biased training
+> sample but does not generalize. **A corrected model is in progress.**
+> Until then, the SDK and hook will emit a `DeprecationWarning` on use.
+
 Non-LLM failure detector for coding agents (Claude Code, SWE-agent, OpenHands, …),
 shipping with a Claude Code hook that surfaces drift to the human for review.
 
-Predicts whether an in-flight coding-agent trajectory is heading toward
-failure using 10 structural features (no LLM calls). CV ROC-AUC 0.76
-on n=185 SWE-bench trajectories; signal is real from turn ~10 and
-saturates around turn ~50.
+Intended behavior: predict whether an in-flight coding-agent trajectory
+is heading toward failure using 10 structural features (no LLM calls).
+Signal is real from turn ~10 and saturates around turn ~50 on the
+training sample — **but per the warning above, the current model does
+not generalize to a representative sample.**
 
 ## Install
 

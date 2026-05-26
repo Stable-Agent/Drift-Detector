@@ -8,6 +8,7 @@ trajectories; saturates at turn ~50 with real signal from turn 10.
 from __future__ import annotations
 
 import pickle
+import warnings
 from importlib.resources import files
 from pathlib import Path
 from typing import Any
@@ -18,6 +19,15 @@ __all__ = ["Detector", "Assessment"]
 
 
 _DEFAULT_THRESHOLD = 0.5
+
+_BROKEN_MODEL_WARNING = (
+    "drift-detector: the bundled model (non_llm_detector_v0.pkl) is known "
+    "BROKEN as of 2026-05-26 — it was trained on a hand-curated sample "
+    "and on a held-out random sample of 400 resolved trajectories it fires "
+    "at 88% false-positive rate at threshold 0.5. A corrected model is in "
+    "progress. See README for details. Set DRIFT_SUPPRESS_BROKEN_WARNING=1 "
+    "to silence this warning."
+)
 
 
 class Assessment:
@@ -73,6 +83,9 @@ class Detector:
 
     def __init__(self, threshold: float = _DEFAULT_THRESHOLD,
                  model_path: str | Path | None = None):
+        import os
+        if os.environ.get("DRIFT_SUPPRESS_BROKEN_WARNING") != "1":
+            warnings.warn(_BROKEN_MODEL_WARNING, DeprecationWarning, stacklevel=2)
         if model_path is not None:
             with open(model_path, "rb") as f:
                 self._bundle = pickle.load(f)
