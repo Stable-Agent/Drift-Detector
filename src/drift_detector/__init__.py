@@ -16,4 +16,14 @@ from .features import FEATURES, extract_features
 
 __version__ = "0.1.0"
 
-__all__ = ["Detector", "Assessment", "FEATURES", "extract_features"]
+__all__ = ["Detector", "Assessment", "FEATURES", "extract_features",
+           "NeighborScore"]
+
+
+def __getattr__(name):
+    """Lazy-import NeighborScore so users without sentence-transformers
+    can still use the structural detector."""
+    if name == "NeighborScore":
+        from .neighbor import NeighborScore
+        return NeighborScore
+    raise AttributeError(f"module 'drift_detector' has no attribute {name!r}")

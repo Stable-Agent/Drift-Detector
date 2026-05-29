@@ -20,6 +20,7 @@ classifiers = [
 dependencies = [
     "scikit-learn>=1.0",
     "numpy>=1.24",
+    "sentence-transformers>=2.7",
 ]
 
 [project.optional-dependencies]
@@ -32,4 +33,4 @@ drift-hook = "drift_detector.hook:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-drift_detector = ["data/*.pkl"]
+drift_detector = ["data/*.pkl", "data/*.npz"]

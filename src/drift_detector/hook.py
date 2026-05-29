@@ -26,26 +26,33 @@ Behavior:
 
 Two-tier decision logic:
   struct < STRUCT_LOW  → pass through
-  struct ≥ EXTREME     → block immediately (no LLM call)
-  STRUCT_LOW ≤ struct < EXTREME → consult LLM judge (Opus by default);
-                                  block iff struct ≥ STRUCT_HIGH AND
-                                  judge ≥ JUDGE_THRESHOLD
+  struct ≥ EXTREME     → block immediately (no second-tier call)
+  STRUCT_LOW ≤ struct < EXTREME → consult second tier; block iff
+                                  struct ≥ STRUCT_HIGH AND second ≥ SECOND_THR
 
-This matches the validated operating point on n=66 trajectories:
-  struct>0.7 AND Opus>0.3 → 100% precision, 11.1% recall
-(vs structural-alone at struct>0.8: 100% precision, only 1.4% recall.)
+Second tier (in order of fallback):
+  1. NeighborScore — sentence-transformer K-NN retrieval against bundled
+     reference set. Deterministic, free, ~50ms. Default tier.
+     Held-out AUC 0.75 ± 0.03; pooled struct>0.5 AND nn>0.7 → 100%/9%
+  2. OpusJudge — `claude -p --model opus` LLM call. Optional opt-in for
+     a third corroborating signal (DRIFT_USE_JUDGE=1, off by default).
 
 Env config:
-  DRIFT_STRUCT_LOW         — default 0.5 (below this: pass through)
-  DRIFT_STRUCT_HIGH        — default 0.7 (struct part of AND-gate)
-  DRIFT_STRUCT_EXTREME     — default 0.8 (above this: block w/o judge)
-  DRIFT_JUDGE_THRESHOLD    — default 0.3 (judge part of AND-gate)
-  DRIFT_JUDGE_MODEL        — default claude-opus-4-7
-  DRIFT_USE_JUDGE          — set to "0" to disable second-tier judge
-  DRIFT_THROTTLE_SECONDS   — default 30
-  DRIFT_DISABLED           — set to "1" to no-op
-  DRIFT_DEBUG              — set to "1" for stderr diagnostics
-  DRIFT_STATE_DIR          — default /tmp (throttle state files)
+  DRIFT_STRUCT_LOW       — default 0.5 (below this: pass through)
+  DRIFT_STRUCT_HIGH      — default 0.5 (struct part of AND-gate; with NN
+                           the validated operating point uses 0.5, not 0.7)
+  DRIFT_STRUCT_EXTREME   — default 0.85 (above this: block immediately)
+  DRIFT_NN_THRESHOLD     — default 0.7 (NN part of AND-gate)
+  DRIFT_NN_K             — default 50 (number of neighbors)
+  DRIFT_USE_NN           — set to "0" to disable NN tier (falls back to
+                           OpusJudge if DRIFT_USE_JUDGE=1, else passes through)
+  DRIFT_USE_JUDGE        — set to "1" to enable Opus judge tier (default 0)
+  DRIFT_JUDGE_THRESHOLD  — default 0.3 (judge part of AND-gate)
+  DRIFT_JUDGE_MODEL      — default claude-opus-4-7
+  DRIFT_THROTTLE_SECONDS — default 30
+  DRIFT_DISABLED         — set to "1" to no-op
+  DRIFT_DEBUG            — set to "1" for stderr diagnostics
+  DRIFT_STATE_DIR        — default /tmp (throttle state files)
 """
 
 from __future__ import annotations
@@ -140,16 +147,13 @@ def _throttle_ok(session_id: str, event: str, throttle_seconds: int) -> bool:
     return True
 
 
-def _block_reason(assessment, judge_score: float | None) -> str:
+def _block_reason(assessment, second_tier: str | None,
+                  second_score: float | None) -> str:
     top = ", ".join(f"{f}={c:+.2f}" for f, c in assessment.top_contributors[:3])
-    if judge_score is not None:
-        confirm = (
-            f" LLM judge confirmed (score {judge_score:.2f}). Joint signal "
-            f"gives ~100% precision at this operating point on the n=66 "
-            f"validation set."
-        )
+    if second_tier is not None and second_score is not None:
+        confirm = (f" {second_tier} confirmed (score {second_score:.2f}).")
     else:
-        confirm = " High structural confidence (no LLM-judge needed)."
+        confirm = " High structural confidence (no second tier consulted)."
     return (
         f"[drift-detector] Drift detected — structural score {assessment.score:.2f}. "
         f"Top features: {top}.{confirm} "
@@ -205,15 +209,16 @@ def main() -> int:
         _emit()
         return 0
 
-    # Two-tier thresholds:
-    #   struct >= STRUCT_HIGH       -> block immediately (rare, extreme cases)
-    #   STRUCT_LOW <= struct < HIGH -> consult LLM judge; block iff judge confirms
-    #   struct < STRUCT_LOW         -> pass through
+    # Two-tier thresholds. Defaults tuned for the NN second tier
+    # (mean AUC 0.75, pooled struct>0.5 AND nn>0.7 → 100%/9% precision/recall).
     struct_low = float(os.environ.get("DRIFT_STRUCT_LOW", "0.5"))
-    struct_high = float(os.environ.get("DRIFT_STRUCT_HIGH", "0.7"))
+    struct_high = float(os.environ.get("DRIFT_STRUCT_HIGH", "0.5"))
+    struct_extreme = float(os.environ.get("DRIFT_STRUCT_EXTREME", "0.85"))
+    nn_thr = float(os.environ.get("DRIFT_NN_THRESHOLD", "0.7"))
+    nn_K = int(os.environ.get("DRIFT_NN_K", "50"))
     judge_thr = float(os.environ.get("DRIFT_JUDGE_THRESHOLD", "0.3"))
-    struct_extreme = float(os.environ.get("DRIFT_STRUCT_EXTREME", "0.8"))
-    use_judge = os.environ.get("DRIFT_USE_JUDGE", "1") == "1"
+    use_nn = os.environ.get("DRIFT_USE_NN", "1") == "1"
+    use_judge = os.environ.get("DRIFT_USE_JUDGE", "0") == "1"
 
     try:
         from .detector import Detector
@@ -226,52 +231,64 @@ def main() -> int:
 
     _log(f"event={event} n_msgs={len(messages)} struct={assessment.score:.3f}")
 
-    # Pass through if structural is below the low threshold.
     if assessment.score < struct_low:
         _emit()
         return 0
 
-    # Extreme-confidence path: block without judge.
     if assessment.score >= struct_extreme:
-        _log(f"struct {assessment.score:.2f} >= extreme {struct_extreme} — blocking without judge")
+        _log(f"struct {assessment.score:.2f} >= extreme {struct_extreme} — block")
         _emit({"decision": "block",
-               "reason": _block_reason(assessment, judge_score=None)})
+               "reason": _block_reason(assessment, None, None)})
         return 0
 
-    # Borderline: optionally consult judge. AND-gate: block iff
-    # struct >= STRUCT_HIGH and judge >= JUDGE_THRESHOLD.
-    if not use_judge:
-        _log("DRIFT_USE_JUDGE=0; refusing to block on structural-only borderline")
-        _emit()
-        return 0
+    # Borderline: consult second tier(s).
+    nn_score = None
+    if use_nn:
+        try:
+            from .neighbor import NeighborScore, neighbor_unavailable_reason
+        except Exception as e:
+            _log(f"NeighborScore import failed: {e}")
+            NeighborScore = None
+            neighbor_unavailable_reason = lambda: f"import failed: {e}"
+        if NeighborScore is not None:
+            unavail = neighbor_unavailable_reason()
+            if unavail:
+                _log(f"NN unavailable ({unavail})")
+            else:
+                try:
+                    ns = NeighborScore(K=nn_K)
+                    nn_score = ns.score(messages)
+                    _log(f"NN K={nn_K} → {nn_score}")
+                except Exception as e:
+                    _log(f"NN call failed: {e}")
 
-    try:
-        from .judge import OpusJudge, judge_unavailable_reason
-    except Exception as e:
-        _log(f"judge import failed: {e}; pass through")
-        _emit()
-        return 0
-    unavail = judge_unavailable_reason()
-    if unavail:
-        _log(f"judge unavailable ({unavail}); pass through")
-        _emit()
-        return 0
-
-    judge_model = os.environ.get("DRIFT_JUDGE_MODEL", "claude-opus-4-7")
-    judge = OpusJudge(model=judge_model)
-    judge_score = judge.score(messages)
-    _log(f"judge ({judge_model}) → {judge_score}")
-    if judge_score is None:
-        _log("judge call failed; pass through (no block on structural alone)")
-        _emit()
-        return 0
-
-    if assessment.score >= struct_high and judge_score >= judge_thr:
+    if nn_score is not None and assessment.score >= struct_high and nn_score >= nn_thr:
         _emit({"decision": "block",
-               "reason": _block_reason(assessment, judge_score=judge_score)})
+               "reason": _block_reason(assessment, f"K-NN (K={nn_K})", nn_score)})
         return 0
 
-    _log(f"borderline cleared: struct={assessment.score:.2f}, judge={judge_score:.2f}")
+    # Optional opt-in: Opus judge tier (if user explicitly enables).
+    if use_judge:
+        judge_score = None
+        try:
+            from .judge import OpusJudge, judge_unavailable_reason
+        except Exception as e:
+            _log(f"judge import failed: {e}")
+        else:
+            unavail = judge_unavailable_reason()
+            if unavail:
+                _log(f"judge unavailable ({unavail})")
+            else:
+                model = os.environ.get("DRIFT_JUDGE_MODEL", "claude-opus-4-7")
+                judge_score = OpusJudge(model=model).score(messages)
+                _log(f"judge ({model}) → {judge_score}")
+        if (judge_score is not None and assessment.score >= struct_high
+                and judge_score >= judge_thr):
+            _emit({"decision": "block",
+                   "reason": _block_reason(assessment, "Opus judge", judge_score)})
+            return 0
+
+    _log(f"borderline cleared: struct={assessment.score:.2f}, nn={nn_score}")
     _emit()
     return 0
 
